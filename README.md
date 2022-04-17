@@ -2,7 +2,7 @@
 
 **DISCLAIMER:
 You assume full responsibility when running this program. I am not responsibile for any intentional / accidental data loss.
-This software also has no concept of which file is the "original". If you have a preference for maintaining file structure for the "original" file, then you shouldn't use this software.**
+This software also has no concept of which file is the "original". It may not find your files in order, so it may delete one from the folder you're familiar with it in. If you have a preference for maintaining file location for the "original" file, then you shouldn't use this software.**
 
 Recursively search and remove duplicate files from the binary's working directory. Uses sha256 to hash files and detect dupes. 
 

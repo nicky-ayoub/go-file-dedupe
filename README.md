@@ -11,3 +11,4 @@ In personal testing it removed 16470 duplicate files from a 150GB pool (on an HD
 
 ## Example output
 ![dedupe cli output](dedupe-dialog.png)
+_Note that we only print to stdout every 50 messages as to not slow down the program. Since disk io is sequential, doing stdout on one goroutine and deleting on another in my mind wouldn't boost performance. I could be wrong, please let me know if this is not the case._

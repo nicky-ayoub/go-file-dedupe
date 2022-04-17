@@ -1,7 +1,7 @@
 # go-file-dedupe
 
 **DISCLAIMER:
-You assume full responsibility when running this program. I am not responsibile for any intentional / accidental data loss.
+You assume full responsibility of the side effects that may occur by running this program. I am not responsibile for any intentional / accidental data loss.
 This software also has no concept of which file is the "original". It may not find your files in order, so it may delete one from the folder you're familiar with it in. If you have a preference for maintaining file location for the "original" file, then you shouldn't use this software.**
 
 ## What does this software do?

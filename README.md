@@ -7,7 +7,7 @@ This software also has no concept of which file is the "original". It may not fi
 ## What does this software do?
 Recursively search and remove duplicate files from the binary's working directory. Uses sha256 to hash files and detect dupes. 
 
-In personal testing it removed 16470 duplicate files from a 150GB pool (on an HDD) of files in the span of ~30 minutes.
+In personal testing it removed 16470 duplicate files from a 150GB pool (on an HDD) of files in the span of ~30 minutes. I assume that it would complete much faster on an SSD.
 
 ## Example output
 ![dedupe cli output](dedupe-dialog.png)

@@ -1,23 +1,27 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
+
+	"me/go-file-dedupe/fswalk"
+	"me/go-file-dedupe/iphash"
 
 	"github.com/go-git/go-billy/v5"
+	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-billy/v5/osfs"
 )
 
-type sha256bytes [sha256.Size]byte
+var FileByteMap map[iphash.HashBytes]string
+var FileByteMapDups map[iphash.HashBytes][]string
 
-var FileByteMap map[sha256bytes][]string
-
-var FileMap map[string]sha256bytes
+var FileMap map[string]iphash.HashBytes
 
 var discoveredPaths []string
 var fs billy.Filesystem
@@ -25,34 +29,32 @@ var mem billy.Filesystem
 
 func main() {
 	// Create hashmap to check against for duped files
-	FileByteMap = make(map[sha256bytes][]string)
-	FileMap = make(map[string]sha256bytes)
-	workingDir := getWorkingDir()
-
+	FileByteMap = make(map[iphash.HashBytes]string)
+	FileByteMapDups = make(map[iphash.HashBytes][]string)
+	FileMap = make(map[string]iphash.HashBytes)
 	discoveredPaths = []string{}
 
+	// Setup the File Systems to Scan and create
+	workingDir := getWorkingDir()
 	fs = osfs.New(workingDir)
-	//mem = memfs.New()
-	//fs.Chroot(fs.Root())
+	mem = memfs.New()
 
-	fmt.Println(fs.Root())
-	//fmt.Println(mem.Root())
+	// FS is the data file system
+	// MEM  is the metadata file system - will be the real cache at some point
 
-	x, err := fs.ReadDir("/")
-	if err != nil {
-		log.Fatalln("Can't read dir root file system", err)
-	}
-	for i, e := range x {
-		fmt.Printf("%08d : %s\n", i, e.Name())
-	}
+	//readdir(fs)
+	log.Println("Scanning for duplicates...")
+	fmt.Print("\033[s")
+	go StartSpider()
+	fswalk.Walk(fs, ".", billy_dedupe)
+	//dumpFileMap()
+	//dumpFileMapDups()
 
-	// filepath.WalkDir(workingDir, dedupe)
+	//readdir(mem)
 
-	Walk(fs, ".", billy_dedupe)
+	log.Println("Printing duplicates...")
+	fswalk.Walk(mem, ".", billy_print_dups) // just because we can...
 
-	for key, element := range FileMap {
-		fmt.Println("Hash:", getHashToPath(element), ":", key)
-	}
 	fmt.Println(len(FileMap), " Files")
 	fmt.Println(len(FileByteMap), " unique hashes")
 	fmt.Println(len(discoveredPaths), " unique discoveredPaths")
@@ -61,81 +63,33 @@ func main() {
 	//fmt.Scanf("%s")
 }
 
-func getFileHashBytes(file string) sha256bytes {
-	hasher := sha256.New()
-	s, err := ioutil.ReadFile(file)
-	hasher.Write(s)
-	if err != nil {
-		log.Fatal(err)
-	}
-	var arr sha256bytes
-	hash := hasher.Sum(nil)
-	copy(arr[:], hash[:sha256.Size])
-
-	return arr
-}
-
-func getFileHash(file string) string {
-	hasher := sha256.New()
-	s, err := ioutil.ReadFile(file)
-	hasher.Write(s)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	hash := hex.EncodeToString(hasher.Sum(nil))
-
-	return hash
-}
-
-func getFileHashParts(file string) []string {
-	curFileHash := getFileHash(file)
-	parts := []string{curFileHash[0:2], curFileHash[2:4], curFileHash[4:]}
-	return parts
-}
-
-func getHashToPath(code sha256bytes) string {
-	curFileHash := hex.EncodeToString(code[:])
-	parts := []string{curFileHash[0:2], curFileHash[2:4], curFileHash[4:]}
-	return filepath.Join(parts...)
-}
-
-func getFileHashPath(file string) string {
-	parts := getFileHashParts(file)
-	return filepath.Join(parts...)
-}
-
 func getWorkingDir() string {
-	pwd, err := os.Getwd()
+	dir, err := os.Getwd()
+	if err != nil {
+		log.Fatalln(err)
+	}
+	return dir
+}
+
+func billy_print_dups(path string, info os.FileInfo, err error) error {
 	if err != nil {
 		fmt.Println(err)
-		os.Exit(1)
-	}
-	return pwd
-}
-
-func dedupe(s string, d os.DirEntry, err error) error {
-	if err != nil {
 		return err
 	}
-
-	if d.Type().IsRegular() {
-		bytes := getFileHashBytes(s)
-		//fmt.Printf("%s\n", hex.EncodeToString(bytes[:]))
-		FileMap[s] = bytes
-
-		// Do map key lookup
-		_, hashExists := FileByteMap[bytes]
-
-		if !hashExists {
-			// Add new file hash to hashmap
-			FileByteMap[bytes] = make([]string, 0)
-		} else {
-			fmt.Printf("DupFile %s %+q\n", getFileHash(s), FileByteMap[bytes])
+	if !info.IsDir() {
+		file, _ := mem.Open(path)
+		defer file.Close()
+		lines, body, err := lineCounter(file)
+		if err != nil {
+			fmt.Println(err)
+			return err
 		}
-		FileByteMap[bytes] = append(FileByteMap[bytes], s)
-	} else {
-		discoveredPaths = append(discoveredPaths, s)
+
+		if lines > 1 {
+			fmt.Printf("name: %s: lines %d\n", path, lines)
+			fileContent := string(body)
+			fmt.Println(fileContent)
+		}
 	}
 	return nil
 }
@@ -146,102 +100,102 @@ func billy_dedupe(path string, info os.FileInfo, err error) error {
 		return err
 	}
 	if !info.IsDir() {
-		bytes := getFileHashBytes(path)
-		//fmt.Printf("%s\n", hex.EncodeToString(bytes[:]))
-		FileMap[path] = bytes
+		code := iphash.GetFileHashBytes(path)
+		//fmt.Printf("%s\n", hex.EncodeToString(code[:]))
+		FileMap[path] = code
 
 		// Do map key lookup
-		_, hashExists := FileByteMap[bytes]
+		_, hashExists := FileByteMap[code]
 
 		if !hashExists {
 			// Add new file hash to hashmap
-			FileByteMap[bytes] = make([]string, 0)
+			FileByteMap[code] = path
 		} else {
-			fmt.Printf("DupFile %s %+q\n", getFileHash(path), FileByteMap[bytes])
+			fmt.Printf("DupFile '%s' %s %+q\n", path, iphash.GetFileHash(path), FileByteMap[code])
+			FileByteMapDups[code] = append(FileByteMapDups[code], path)
 		}
-		FileByteMap[bytes] = append(FileByteMap[bytes], path)
+		AppendLineToFile(mem, path, iphash.GetHashToPath(code))
 	} else {
 		discoveredPaths = append(discoveredPaths, path)
 	}
 	return nil
 }
 
-// walk recursively descends path, calling walkFn
-// adapted from https://golang.org/src/path/filepath/path.go
-func walk(fs billy.Filesystem, path string, info os.FileInfo, walkFn filepath.WalkFunc) error {
-	if !info.IsDir() {
-		return walkFn(path, info, nil)
+func AppendLineToFile(fs billy.Filesystem, line string, file string) error {
+	if _, err := fs.Stat(filepath.Dir(file)); os.IsNotExist(err) {
+		fs.MkdirAll(filepath.Dir(file), 0700) // Create your file
 	}
-
-	names, err := readdirnames(fs, path)
-	err1 := walkFn(path, info, err)
-	// If err != nil, walk can't walk into this directory.
-	// err1 != nil means walkFn want walk to skip this directory or stop walking.
-	// Therefore, if one of err and err1 isn't nil, walk will return.
-	if err != nil || err1 != nil {
-		// The caller's behavior is controlled by the return value, which is decided
-		// by walkFn. walkFn may ignore err and return nil.
-		// If walkFn returns SkipDir, it will be handled by the caller.
-		// So walk should return whatever walkFn returns.
-		return err1
+	f, err := fs.OpenFile(file,
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
 	}
-
-	for _, name := range names {
-		filename := filepath.Join(path, name)
-		fileInfo, err := fs.Lstat(filename)
-		if err != nil {
-			if err := walkFn(filename, fileInfo, err); err != nil && err != filepath.SkipDir {
-				return err
-			}
-		} else {
-			err = walk(fs, filename, fileInfo, walkFn)
-			if err != nil {
-				if !fileInfo.IsDir() || err != filepath.SkipDir {
-					return err
-				}
-			}
-		}
+	defer f.Close()
+	if _, err := f.Write([]byte(line + "\n")); err != nil {
+		return err
 	}
 	return nil
 }
 
-// Stolen from the billy master
+func lineCounter(r io.Reader) (int, []byte, error) {
+	buf := make([]byte, 32*1024)
+	count := 0
+	lineSep := []byte{'\n'}
 
-// Walk walks the file tree rooted at root, calling fn for each file or
-// directory in the tree, including root. All errors that arise visiting files
-// and directories are filtered by fn: see the WalkFunc documentation for
-// details.
-//
-// The files are walked in lexical order, which makes the output deterministic
-// but requires Walk to read an entire directory into memory before proceeding
-// to walk that directory. Walk does not follow symbolic links.
-//
-// Function adapted from https://github.com/golang/go/blob/3b770f2ccb1fa6fecc22ea822a19447b10b70c5c/src/path/filepath/path.go#L500
-func Walk(fs billy.Filesystem, root string, walkFn filepath.WalkFunc) error {
-	info, err := fs.Lstat(root)
+	for {
+		c, err := r.Read(buf)
+		count += bytes.Count(buf[:c], lineSep)
+
+		switch {
+		case err == io.EOF:
+			return count, buf, nil
+
+		case err != nil:
+			return count, buf, err
+		}
+	}
+}
+func readdir(fs billy.Filesystem) {
+	fmt.Println("\nDump Directory", fs.Root(), "\n-------------------------")
+	x, err := fs.ReadDir("/")
 	if err != nil {
-		err = walkFn(root, nil, err)
-	} else {
-		err = walk(fs, root, info, walkFn)
+		log.Fatalln("Can't read dir root file system", err)
 	}
-
-	if err == filepath.SkipDir {
-		return nil
+	for i, e := range x {
+		if !e.IsDir() {
+			fmt.Printf("%08d : %s  <%s>\n", i, e.Name(), iphash.GetFileHash(e.Name()))
+		} else {
+			fmt.Printf("%08d : %s\n", i, e.Name())
+		}
 	}
-
-	return err
+	fmt.Println("-------------------------")
+}
+func dumpFileMap() {
+	fmt.Println("\nDump FileMap\n-------------------------")
+	for key, element := range FileMap {
+		fmt.Println("Hash:", iphash.GetHashToPath(element), ":", key)
+	}
+	fmt.Println("-------------------------")
+}
+func dumpFileMapDups() {
+	fmt.Println("\nDump FileMapDups\n-------------------------")
+	for key, element := range FileByteMapDups {
+		fmt.Println("Hash:", iphash.GetHashToPath(key), ":", strings.Join(element[:], ","))
+	}
+	fmt.Println("-------------------------")
 }
 
-func readdirnames(fs billy.Filesystem, dir string) ([]string, error) {
-	files, err := fs.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
+// StartSpider starts the spider. Call this function in a goroutine.
+func StartSpider() {
+	nextTime := time.Now().Truncate(time.Minute)
+	nextTime = nextTime.Add(time.Minute)
+	time.Sleep(time.Until(nextTime))
+	Spider()
+	go StartSpider()
+}
 
-	var names []string
-	for _, file := range files {
-		names = append(names, file.Name())
-	}
-
-	return names, nil
+// Spider scans website's market.
+func Spider() {
+	fmt.Print("\033[u\033[K")
+	fmt.Printf("Progress : %d file(s) scanned", len(FileMap))
 }

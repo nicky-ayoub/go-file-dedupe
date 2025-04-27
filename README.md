@@ -1,14 +1,28 @@
 # go-file-dedupe
 
+## Attribution 
+Based on https://github.com/imdawon/go-file-dedupe 
+
+This is not a dedup system yet. It only scans the current working directory for now.
+The system is architected to use works for perform the digesting.
+
+## What does this software do?
+go-file-dedupe recursively searches the current working directory. It uses sha256 ( or MD5 ) to hash files to identify duplicates. 
+
+
 **DISCLAIMER:
 You assume full responsibility of the side effects that may occur by running this program. I am not responsibile for any intentional / accidental data loss.
 This software also has no concept of which file is the "original". It may not find your files in order, so it may delete one from the folder you're familiar with it in. If you have a preference for maintaining file location for the "original" file, then you shouldn't use this software.**
 
-## What does this software do?
-go-file-dedupe recursively searches and removes duplicate files from the binarys working directory. It uses sha256 to hash files to compare against future files to identify duplicates. 
+## Progress
+It uses a goroutine to print out stats as it runs.
+It can digest a file in the CWD tree using sha256 or md5.
+It can use goroutines to compute digests. The count is configurable
+It reports common files without removing the duplicates yet.
 
-In personal testing it removed 16470 duplicate files from a 150GB pool (on an HDD) of files in the span of ~30 minutes. I assume that it would complete much faster on an SSD.
+## To Do
+Handle symlinks.
+Link rather than remove.
+Experiment with CAS like git does.
 
-## Example output
-![dedupe cli output](dedupe-dialog.png)
-_Note that we only print to stdout every 50 files we delete as to not slow down the program. Since disk io is sequential, doing stdout on one goroutine and deleting files on another in my mind wouldn't boost performance. I could be wrong, please let me know if this is not the case._
+Nicky

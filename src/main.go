@@ -23,6 +23,8 @@ import (
 )
 
 // --- Application Struct ---
+
+// Deduplicator is the main application struct that holds configuration and state.
 type Deduplicator struct {
 	// Configuration
 	rootDir  string
@@ -42,7 +44,7 @@ type Deduplicator struct {
 	linksCreatedCount atomic.Uint64
 }
 
-// --- Constructor ---
+// NewDeduplicator creates and initializes a Deduplicator instance.
 func NewDeduplicator(rootDir string, hashFunc fswalk.HashFunc, out io.Writer) *Deduplicator {
 	return &Deduplicator{
 		rootDir:         rootDir,
@@ -137,27 +139,6 @@ func (d *Deduplicator) findDuplicates() {
 			d.fileByteMapDups[hashString] = append(d.fileByteMapDups[hashString], path)
 		}
 	}
-}
-
-// reportFileMap prints the content of the fileMap (path -> hash).
-func (d *Deduplicator) reportFileMap() {
-	fmt.Fprintln(d.out, "\nDump FileMap (Path -> Hash)\n-------------------------")
-	count := 0
-	limit := 50 // Example limit
-
-	// Access struct field directly
-	fmt.Fprintf(d.out, "FileMap contains %d entries\n", len(d.fileMap))
-
-	for key, element := range d.fileMap {
-		str := hex.EncodeToString(element)
-		fmt.Fprintln(d.out, "Hash:", str, ":", key)
-		count++
-		if count >= limit {
-			fmt.Fprintln(d.out, "... (output limited to", limit, "entries)")
-			break
-		}
-	}
-	fmt.Fprintln(d.out, "-------------------------")
 }
 
 // reportDuplicates prints the content of the fileByteMapDups (hash -> paths).

@@ -1,4 +1,4 @@
-// /home/nicky/src/go/go-file-dedupe/src/iphash/iphash.go
+// Package iphash provides functions to compute file hashes using different algorithms.
 package iphash
 
 import (
@@ -26,13 +26,13 @@ var bufferPool = sync.Pool{
 // HashBytes remains the same type alias for the MD5 fixed-size array
 type HashBytes []byte
 
-// GetFileHashBytes calculates the MD5 hash of a file efficiently using streaming I/O.
+// GetFileHashMD5bytes calculates the MD5 hash of a file efficiently using streaming I/O.
 // This version avoids loading the entire file into memory.
 func GetFileHashMD5bytes(path string) (HashBytes, error) {
 	return getFileHash(path, md5.New())
 }
 
-// GetFileHashBytes calculates the MD5 hash of a file efficiently using streaming I/O.
+// GetFileHashSHA256bytes calculates the MD5 hash of a file efficiently using streaming I/O.
 // This version avoids loading the entire file into memory.
 func GetFileHashSHA256bytes(path string) (HashBytes, error) {
 	return getFileHash(path, sha256.New())

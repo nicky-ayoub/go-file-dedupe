@@ -1,4 +1,4 @@
-// /home/nicky/src/go/go-file-dedupe/src/fswalk/fswalk.go
+// Package fswalk handles file scanning and hashing in a directory tree.
 package fswalk
 
 import (

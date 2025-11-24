@@ -6,6 +6,7 @@ import (
 	"me/go-file-dedupe/iphash"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestDigestAll_HappyPath(t *testing.T) {
 	rootDir := setupTestDir(t)
 	var filesFound, filesHashed atomic.Uint64
 
-	fileMap, dirs, err := DigestAll(context.Background(), rootDir, mockHashFunc, 2, &filesFound, &filesHashed)
+	duplicates, dirs, err := DigestAll(context.Background(), rootDir, mockHashFunc, 2, &filesFound, &filesHashed)
 
 	if err != nil {
 		t.Fatalf("DigestAll returned an unexpected error: %v", err)
@@ -61,18 +62,25 @@ func TestDigestAll_HappyPath(t *testing.T) {
 	if filesHashed.Load() != 3 {
 		t.Errorf("Expected 3 files hashed, got %d", filesHashed.Load())
 	}
-	if len(fileMap) != 3 {
-		t.Errorf("Expected fileMap to have 3 entries, got %d", len(fileMap))
-	}
 	if len(dirs) != 1 {
 		t.Errorf("Expected 1 subdirectory discovered, got %d", len(dirs))
 	}
 
-	// Check for duplicate hashes
-	hash1 := fileMap[filepath.Join(rootDir, "file1.txt")]
-	hash3 := fileMap[filepath.Join(rootDir, "subdir", "file3.txt")]
-	if iphash.HashToString(hash1) != iphash.HashToString(hash3) {
-		t.Error("Expected hashes for file1.txt and file3.txt to be identical")
+	// Check that the duplicates map is correct.
+	if len(duplicates) != 1 {
+		t.Fatalf("Expected duplicates map to have 1 entry, got %d", len(duplicates))
+	}
+
+	// The MD5 hash for "alpha" is "900150983cd24fb0d6963f7d28e17f72"
+	expectedHash := "900150983cd24fb0d6963f7d28e17f72"
+	dupPaths, ok := duplicates[expectedHash]
+	if !ok {
+		t.Fatalf("Expected to find duplicates for hash %s, but none were found", expectedHash)
+	}
+
+	sort.Strings(dupPaths) // Sort for deterministic checking.
+	if len(dupPaths) != 2 || dupPaths[0] != filepath.Join(rootDir, "file1.txt") || dupPaths[1] != filepath.Join(rootDir, "subdir", "file3.txt") {
+		t.Errorf("Incorrect duplicate paths found. Got: %v", dupPaths)
 	}
 }
 
@@ -107,12 +115,12 @@ func TestDigestAll_EmptyDir(t *testing.T) {
 	rootDir := t.TempDir()
 	var filesFound, filesHashed atomic.Uint64
 
-	fileMap, dirs, err := DigestAll(context.Background(), rootDir, mockHashFunc, 2, &filesFound, &filesHashed)
+	duplicates, dirs, err := DigestAll(context.Background(), rootDir, mockHashFunc, 2, &filesFound, &filesHashed)
 
 	if err != nil {
 		t.Fatalf("DigestAll returned an unexpected error for an empty directory: %v", err)
 	}
-	if filesFound.Load() != 0 || filesHashed.Load() != 0 || len(fileMap) != 0 || len(dirs) != 0 {
+	if filesFound.Load() != 0 || filesHashed.Load() != 0 || len(duplicates) != 0 || len(dirs) != 0 {
 		t.Error("Expected zero results for an empty directory")
 	}
 }
@@ -150,7 +158,7 @@ func TestDigestAll_UnreadableDir(t *testing.T) {
 
 	// 3. Run DigestAll and expect it to succeed without error.
 	var filesFound, filesHashed atomic.Uint64
-	fileMap, _, err := DigestAll(context.Background(), rootDir, mockHashFunc, 2, &filesFound, &filesHashed)
+	duplicates, _, err := DigestAll(context.Background(), rootDir, mockHashFunc, 2, &filesFound, &filesHashed)
 
 	if err != nil {
 		t.Fatalf("DigestAll returned an unexpected error when encountering an unreadable directory: %v", err)
@@ -161,11 +169,7 @@ func TestDigestAll_UnreadableDir(t *testing.T) {
 		t.Errorf("Expected 1 file found and hashed, but got %d found and %d hashed", filesFound.Load(), filesHashed.Load())
 	}
 
-	if _, ok := fileMap[readableFilePath]; !ok {
-		t.Error("The readable file was not found in the final map.")
-	}
-
-	if _, ok := fileMap[secretFilePath]; ok {
+	if len(duplicates) != 0 {
 		t.Error("The file inside the unreadable directory was incorrectly found.")
 	}
 }
@@ -214,7 +218,7 @@ func TestDigestAll_DeeplyNestedDir(t *testing.T) {
 
 	// 2. Run DigestAll. Use a higher number of workers to exercise the parallel logic.
 	var filesFound, filesHashed atomic.Uint64
-	fileMap, dirs, err := DigestAll(context.Background(), rootDir, mockHashFunc, 4, &filesFound, &filesHashed)
+	duplicates, dirs, err := DigestAll(context.Background(), rootDir, mockHashFunc, 4, &filesFound, &filesHashed)
 
 	if err != nil {
 		t.Fatalf("DigestAll returned an unexpected error: %v", err)
@@ -231,10 +235,20 @@ func TestDigestAll_DeeplyNestedDir(t *testing.T) {
 		t.Errorf("Expected %d directories discovered, got %d", totalDirs, len(dirs))
 	}
 
-	// Check for the duplicate hashes
-	hash1 := fileMap[filepath.Join(level2, "dup1.txt")]
-	hash2 := fileMap[filepath.Join(level4, "dup2.txt")]
-	if iphash.HashToString(hash1) != iphash.HashToString(hash2) {
-		t.Error("Expected hashes for duplicate files in nested directories to be identical")
+	// Check for the duplicate hashes.
+	if len(duplicates) != 1 {
+		t.Fatalf("Expected duplicates map to have 1 entry, got %d", len(duplicates))
+	}
+
+	// The MD5 hash for "duplicate" is "552822c9c61b582c52387a9ab904b4f2"
+	expectedHash := "552822c9c61b582c52387a9ab904b4f2"
+	dupPaths, ok := duplicates[expectedHash]
+	if !ok {
+		t.Fatalf("Expected to find duplicates for hash %s, but none were found", expectedHash)
+	}
+
+	sort.Strings(dupPaths) // Sort for deterministic checking.
+	if len(dupPaths) != 2 || dupPaths[0] != filepath.Join(level2, "dup1.txt") || dupPaths[1] != filepath.Join(level4, "dup2.txt") {
+		t.Errorf("Incorrect duplicate paths found. Got: %v", dupPaths)
 	}
 }

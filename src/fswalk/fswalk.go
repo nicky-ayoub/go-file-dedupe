@@ -3,9 +3,10 @@ package fswalk
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
-	"me/go-file-dedupe/iphash" // Make sure this import path is correct
-	"os"
+	"io/fs"
+	"me/go-file-dedupe/iphash"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,49 @@ import (
 // It matches the signatures of GetFileHashMD5bytes and GetFileHashSHA256bytes.
 // Exported so it can be used by the caller (main.go).
 type HashFunc func(filePath string) (iphash.HashBytes, error)
+
+// walkFiles starts a goroutine to walk the directory tree at root.
+// It sends the path of each regular file to the filePaths channel,
+// each directory to the dirPaths channel, and the result of the
+// walk on the error channel.
+func walkFiles(ctx context.Context, root string, filesFound *atomic.Uint64) (<-chan string, <-chan string, <-chan error) {
+	filePaths := make(chan string)
+	dirPaths := make(chan string)
+	errc := make(chan error, 1)
+
+	go func() {
+		defer close(filePaths)
+		defer close(dirPaths)
+
+		walker := func(path string, d fs.DirEntry, err error) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err() // Cancellation support
+			default:
+			}
+
+			if err != nil {
+				fmt.Printf("Warning: Error accessing %s: %v\n", path, err)
+				return nil // Continue walking if possible
+			}
+
+			if d.IsDir() {
+				if path != root { // Don't report the root directory itself
+					dirPaths <- path
+				}
+			} else if d.Type().IsRegular() {
+				filesFound.Add(1)
+				filePaths <- path
+			}
+			return nil
+		}
+
+		// Use the more modern WalkDir, which is generally more efficient.
+		errc <- filepath.WalkDir(root, walker)
+	}()
+
+	return filePaths, dirPaths, errc
+}
 
 // A result is the product of reading and summing a file using MD5.
 type result struct {
@@ -29,10 +73,15 @@ func digester(ctx context.Context, filePaths <-chan string, c chan<- result, has
 	for path := range filePaths {
 		//fmt.Println("DEBUG: Digester received path:", path)
 		data, err := hashFile(path)
+
+		// After a potentially long operation (hashing), we must check for
+		// cancellation *before* attempting to send the result. This prevents
+		// a deadlock where the receiver has already shut down.
 		select {
-		case c <- result{path, data, err}:
 		case <-ctx.Done():
-			return
+			return // Context was cancelled while hashing, exit immediately.
+		case c <- result{path, data, err}:
+			// Result sent successfully.
 		}
 	}
 }
@@ -44,61 +93,11 @@ func DigestAll(
 	root string,
 	hasher HashFunc,
 	numWorkers int,
-	filesFound *atomic.Uint64, // Pointer to counter
-	filesHashed *atomic.Uint64, // Pointer to counter
-) (map[string]iphash.HashBytes, []string, error) {
-	// --- Parallel Directory Traversal ---
-	var walkWg sync.WaitGroup
-	dirsToWalk := make(chan string, numWorkers) // Buffered channel for directories to walk
-	filePaths := make(chan string, numWorkers)  // Channel for discovered file paths
-	dirPaths := make(chan string, numWorkers)   // Channel for discovered directory paths
-
-	// Start a pool of directory walkers
-	walkWg.Add(1) // Start with 1 for the root directory
-	go func() {   // This single goroutine will spawn the workers
-		for i := 0; i < numWorkers; i++ {
-			go func() {
-				for dir := range dirsToWalk {
-					entries, err := os.ReadDir(dir)
-					if err != nil {
-						fmt.Printf("Warning: Error reading directory %s: %v\n", dir, err)
-						walkWg.Done() // Decrement counter on error
-						continue
-					}
-
-					for _, entry := range entries {
-						fullPath := filepath.Join(dir, entry.Name())
-
-						if entry.IsDir() {
-							select {
-							case dirPaths <- fullPath:
-							case <-ctx.Done():
-								return
-							}
-							walkWg.Add(1) // Add to the waitgroup before sending to the channel
-							select {
-							case dirsToWalk <- fullPath:
-							case <-ctx.Done():
-								walkWg.Done() // Must decrement if we fail to send
-								return
-							}
-						} else if entry.Type().IsRegular() {
-							filesFound.Add(1)
-							select {
-							case filePaths <- fullPath:
-							case <-ctx.Done():
-								return
-							}
-						}
-					}
-					walkWg.Done() // Done with this directory
-				}
-			}()
-		}
-	}()
-
-	// Seed the process with the root directory
-	dirsToWalk <- root
+	filesFound *atomic.Uint64,
+	filesHashed *atomic.Uint64,
+) (map[string][]string, []string, error) {
+	// Start the sequential directory walker.
+	filePaths, dirPaths, errc := walkFiles(ctx, root, filesFound)
 
 	// --- Hashing Worker Pool (Digesters) ---
 	c := make(chan result)
@@ -113,62 +112,79 @@ func DigestAll(
 		}()
 	}
 
-	// Closer goroutine: Waits for all directory walking to complete,
-	// then closes the filePaths channel to signal digesters to stop.
+	// Closer goroutine: Waits for all digesters to finish, then closes the results channel.
 	go func() {
-		walkWg.Wait()
-		close(dirsToWalk)
-		close(filePaths)
 		wg.Wait()
-		close(dirPaths)
-		close(c) // Close results channel after digesters are done.
+		close(c)
 	}()
 
-	// Consume results: Collect hashes into the map and handle errors.
-	// Also consume directory paths concurrently.
-	m := make(map[string]iphash.HashBytes)
+	hashesToPaths := make(map[string][]string)
 	discoveredDirs := []string{}
-	var finalWalkErr error // To store the error from filepath.Walk
+	var finalWalkErr error
 
-	// Use a loop and select to consume from multiple channels until all are closed
-	dirPathsClosed := false
-	resultsClosed := false
+	// This is the main processing loop. It must drain all channels concurrently
+	// until all of them are closed.
+	for {
+		var r result
+		var dirPath string
+		var walkErr error
+		var ok bool
 
-	for !dirPathsClosed || !resultsClosed {
 		select {
-		case dirPath, ok := <-dirPaths:
+		case r, ok = <-c:
 			if !ok {
-				dirPathsClosed = true
-			} else {
-				discoveredDirs = append(discoveredDirs, dirPath)
-			}
-		case r, ok := <-c:
-			if !ok {
-				resultsClosed = true
+				c = nil // Set channel to nil to block it from being selected again.
 			} else {
 				if r.err != nil {
 					fmt.Printf("Error hashing file %s: %v\n", r.path, r.err)
 				}
-				// Only add successfully hashed files
 				if r.err == nil {
 					filesHashed.Add(1)
-					m[r.path] = r.sum
+					hashString := hex.EncodeToString(r.sum)
+					hashesToPaths[hashString] = append(hashesToPaths[hashString], r.path)
 				}
 			}
-		// --- Add check for context cancellation in the main loop ---
-		case <-ctx.Done():
-			// If context is cancelled while waiting for results,
-			// return immediately with the context error.
-			// We might have partial results in 'm' and 'discoveredDirs'.
-			// Depending on requirements, you might choose to return them or nil.
-			// Returning the context error signals cancellation clearly.
-			return m, discoveredDirs, ctx.Err() // Return partial results and context error
+		case dirPath, ok = <-dirPaths:
+			if !ok {
+				dirPaths = nil // Set channel to nil.
+			} else {
+				discoveredDirs = append(discoveredDirs, dirPath)
+			}
+		case walkErr, ok = <-errc:
+			if !ok {
+				errc = nil // Set channel to nil.
+			} else {
+				finalWalkErr = walkErr
+			}
+		}
+
+		// Exit condition for the loop
+		if c == nil && dirPaths == nil && errc == nil {
+			// All channels are closed and drained, so all goroutines have exited.
+			break
 		}
 	}
 
-	if finalWalkErr != nil {
-		return m, discoveredDirs, finalWalkErr
+	// After the loop, check if the context was cancelled.
+	// This is the only safe place to check, after all goroutines are guaranteed to be done.
+	if ctx.Err() != nil {
+		return nil, discoveredDirs, ctx.Err()
 	}
 
-	return m, discoveredDirs, nil
+	// Only if the operation was not cancelled do we proceed to filter and return duplicates.
+	if finalWalkErr == nil {
+		duplicates := make(map[string][]string)
+		for hash, paths := range hashesToPaths {
+			if len(paths) > 1 {
+				duplicates[hash] = paths
+			}
+		}
+		return duplicates, discoveredDirs, nil
+	}
+
+	if finalWalkErr != nil {
+		return nil, discoveredDirs, finalWalkErr
+	}
+
+	return nil, discoveredDirs, nil
 }

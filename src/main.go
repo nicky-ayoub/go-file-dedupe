@@ -37,8 +37,9 @@ type Deduplicator struct {
 	discoveredPaths []string
 
 	// Progress Counters (Atomic)
-	filesFoundCount  atomic.Uint64 // Use atomic types
-	filesHashedCount atomic.Uint64
+	filesFoundCount   atomic.Uint64 // Use atomic types
+	filesHashedCount  atomic.Uint64
+	linksCreatedCount atomic.Uint64
 }
 
 // --- Constructor ---
@@ -177,6 +178,65 @@ func (d *Deduplicator) reportSummary() {
 	fmt.Fprintf(d.out, "%d Files scanned and hashed.\n", len(d.fileMap))
 	fmt.Fprintf(d.out, "%d unique file content hashes found.\n", len(d.fileByteMap))
 	fmt.Fprintf(d.out, "%d directories discovered (excluding root).\n", len(d.discoveredPaths))
+	if d.linksCreatedCount.Load() > 0 {
+		fmt.Fprintf(d.out, "%d duplicate files replaced with hard links.\n", d.linksCreatedCount.Load())
+	}
+}
+
+// hardlinkDuplicates iterates through the found duplicates and replaces them with hard links.
+func (d *Deduplicator) hardlinkDuplicates() {
+	d.logger.Println("Starting hard linking process...")
+
+	// Iterate over the map of duplicates. The key is the hash, the value is a slice of paths.
+	for _, paths := range d.fileByteMapDups {
+		// The first path in the slice is considered the original.
+		originalPath := paths[0]
+		duplicatePaths := paths[1:]
+
+		for _, duplicatePath := range duplicatePaths {
+			// --- Check if files are already hard-linked ---
+			alreadyLinked, err := areFilesHardLinked(originalPath, duplicatePath)
+			if err != nil {
+				d.logger.Printf("Could not check hard link status for %s: %v", duplicatePath, err)
+				continue
+			}
+			if alreadyLinked {
+				d.logger.Printf("Skipping already linked file: %s", duplicatePath)
+				continue
+			}
+
+			// To create a hard link, we must first remove the old file.
+			if err := os.Remove(duplicatePath); err != nil {
+				d.logger.Printf("Failed to remove duplicate file %s: %v", duplicatePath, err)
+				continue // Skip to the next file
+			}
+			// Create a hard link from the original file to the path of the duplicate.
+			if err := os.Link(originalPath, duplicatePath); err != nil {
+				d.logger.Printf("Failed to create hard link from %s to %s: %v", originalPath, duplicatePath, err)
+				continue
+			}
+			d.linksCreatedCount.Add(1)
+			d.logger.Printf("Successfully linked %s -> %s", duplicatePath, originalPath)
+		}
+	}
+}
+
+// areFilesHardLinked checks if two file paths point to the same file on disk (i.e., are hard links).
+// This is done by comparing their device and inode numbers.
+func areFilesHardLinked(path1, path2 string) (bool, error) {
+	info1, err := os.Stat(path1)
+	if err != nil {
+		return false, err
+	}
+
+	info2, err := os.Stat(path2)
+	if err != nil {
+		return false, err
+	}
+
+	// os.SameFile is the canonical way to check if two FileInfo objects refer to the same file.
+	// It handles the underlying system-specific details (like comparing device and inode numbers on Unix).
+	return os.SameFile(info1, info2), nil
 }
 
 // --- Define command-line flag ---
@@ -184,6 +244,7 @@ var (
 	hashAlgorithm = flag.String("algo", "blake3", "Hashing algorithm to use (blake3, sha256, or md5)")
 	workers       = flag.Int("workers", runtime.NumCPU(), "Number of concurrent hashing workers")
 	dryRun        = flag.Bool("dry-run", false, "Perform a dry run without actual deduplication actions")
+	hardlink      = flag.Bool("hardlink", false, "Replace duplicate files with hard links to the original file")
 )
 
 func main() {
@@ -256,6 +317,11 @@ func main() {
 	// --- Report the results ---
 	if *dryRun {
 		app.logger.Println("Dry run mode: No files would be modified.")
+	}
+
+	// --- Perform Hard Linking if requested ---
+	if *hardlink && !*dryRun {
+		app.hardlinkDuplicates()
 	}
 
 	app.reportDuplicates()

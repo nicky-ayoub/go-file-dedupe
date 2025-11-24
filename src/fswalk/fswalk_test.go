@@ -82,12 +82,13 @@ func TestDigestAll_ContextCancellation(t *testing.T) {
 	var filesFound, filesHashed atomic.Uint64
 
 	// Create a context that will be canceled shortly
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// A slow hash function to ensure cancellation happens mid-process
 	slowHashFunc := func(filePath string) (iphash.HashBytes, error) {
-		time.Sleep(100 * time.Millisecond) // This is longer than the context timeout
+		cancel()                          // Cancel the context as soon as the first hash starts
+		time.Sleep(50 * time.Millisecond) // Give time for cancellation to propagate
 		return mockHashFunc(filePath)
 	}
 
@@ -97,8 +98,8 @@ func TestDigestAll_ContextCancellation(t *testing.T) {
 		t.Fatal("Expected a context cancellation error, but got nil")
 	}
 
-	if err != context.DeadlineExceeded {
-		t.Errorf("Expected error to be context.DeadlineExceeded, got %v", err)
+	if err != context.Canceled {
+		t.Errorf("Expected error to be context.Canceled, got %v", err)
 	}
 }
 

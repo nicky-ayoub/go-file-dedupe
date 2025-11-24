@@ -2,7 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/md5"
 	"me/go-file-dedupe/iphash"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -82,4 +86,137 @@ func TestDeduplicator_FindAndReportDuplicates(t *testing.T) {
 	if !strings.Contains(output, "2 unique file content hashes found.") {
 		t.Error("Output is missing the correct unique hash count in the summary.")
 	}
+}
+
+// setupTestDir creates a temporary directory structure for integration testing.
+// root/
+//   - file1.txt (content: "alpha")
+//   - file2.txt (content: "beta")
+//   - subdir/
+//   - file3.txt (content: "alpha") -> duplicate of file1
+func setupTestDir(t *testing.T) string {
+	t.Helper()
+	rootDir := t.TempDir()
+
+	// Create files
+	os.WriteFile(filepath.Join(rootDir, "file1.txt"), []byte("alpha"), 0666)
+	os.WriteFile(filepath.Join(rootDir, "file2.txt"), []byte("beta"), 0666)
+
+	// Create subdirectory and another file
+	subDir := filepath.Join(rootDir, "subdir")
+	os.Mkdir(subDir, 0755)
+	os.WriteFile(filepath.Join(subDir, "file3.txt"), []byte("alpha"), 0666)
+
+	return rootDir
+}
+
+// mockHashFunc is a simple, fast hashing function for testing purposes.
+func mockHashFunc(filePath string) (iphash.HashBytes, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	hash := md5.Sum(content)
+	return hash[:], nil
+}
+
+// TestDeduplicator_Run_Integration tests the full Run method against a temporary filesystem.
+func TestDeduplicator_Run_Integration(t *testing.T) {
+	// 1. Setup
+	rootDir := setupTestDir(t)
+	var out bytes.Buffer
+	deduper := NewDeduplicator(rootDir, mockHashFunc, &out)
+
+	// 2. Execute the Run method
+	err := deduper.Run(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("Deduplicator.Run() returned an unexpected error: %v", err)
+	}
+
+	// 3. Assert the final state of the Deduplicator
+	if found := deduper.filesFoundCount.Load(); found != 3 {
+		t.Errorf("Expected filesFoundCount to be 3, got %d", found)
+	}
+	if hashed := deduper.filesHashedCount.Load(); hashed != 3 {
+		t.Errorf("Expected filesHashedCount to be 3, got %d", hashed)
+	}
+
+	// The number of duplicate *hashes* is the length of the fileByteMapDups map.
+	// The test setup has one set of duplicate files.
+	if dupes := len(deduper.fileByteMapDups); dupes != 1 {
+		t.Errorf("Expected 1 entry in fileByteMapDups, got %d", dupes)
+	}
+
+	if len(deduper.fileMap) != 3 {
+		t.Errorf("Expected fileMap to contain 3 entries, got %d", len(deduper.fileMap))
+	}
+	if len(deduper.fileByteMap) != 2 {
+		t.Errorf("Expected fileByteMap (unique hashes) to contain 2 entries, got %d", len(deduper.fileByteMap))
+	}
+}
+
+// TestAreFilesHardLinked tests the functionality of the areFilesHardLinked helper function.
+func TestAreFilesHardLinked(t *testing.T) {
+	// Setup a temporary directory for our test files
+	tempDir := t.TempDir()
+
+	// --- Test Case 1: Two files that ARE hard links of each other ---
+	t.Run("AreHardLinked", func(t *testing.T) {
+		originalPath := filepath.Join(tempDir, "original.txt")
+		hardlinkPath := filepath.Join(tempDir, "hardlink.txt")
+
+		// Create the original file
+		if err := os.WriteFile(originalPath, []byte("hello world"), 0666); err != nil {
+			t.Fatalf("Failed to create original file: %v", err)
+		}
+
+		// Create a hard link to the original file
+		if err := os.Link(originalPath, hardlinkPath); err != nil {
+			t.Fatalf("Failed to create hard link: %v", err)
+		}
+
+		// Check if they are correctly identified as hard links
+		linked, err := areFilesHardLinked(originalPath, hardlinkPath)
+		if err != nil {
+			t.Errorf("areFilesHardLinked returned an unexpected error: %v", err)
+		}
+		if !linked {
+			t.Error("areFilesHardLinked returned false for files that are hard links, expected true")
+		}
+	})
+
+	// --- Test Case 2: Two separate files with identical content (NOT hard links) ---
+	t.Run("AreNotHardLinked", func(t *testing.T) {
+		file1Path := filepath.Join(tempDir, "file1.txt")
+		file2Path := filepath.Join(tempDir, "file2.txt")
+
+		// Create two separate files
+		if err := os.WriteFile(file1Path, []byte("same content"), 0666); err != nil {
+			t.Fatalf("Failed to create file1: %v", err)
+		}
+		if err := os.WriteFile(file2Path, []byte("same content"), 0666); err != nil {
+			t.Fatalf("Failed to create file2: %v", err)
+		}
+
+		linked, err := areFilesHardLinked(file1Path, file2Path)
+		if err != nil {
+			t.Errorf("areFilesHardLinked returned an unexpected error: %v", err)
+		}
+		if linked {
+			t.Error("areFilesHardLinked returned true for separate files, expected false")
+		}
+	})
+
+	// --- Test Case 3: One of the files does not exist ---
+	t.Run("FileDoesNotExist", func(t *testing.T) {
+		existingPath := filepath.Join(tempDir, "existing.txt")
+		if err := os.WriteFile(existingPath, []byte("exists"), 0666); err != nil {
+			t.Fatalf("Failed to create existing file: %v", err)
+		}
+
+		_, err := areFilesHardLinked(existingPath, "nonexistent.txt")
+		if err == nil {
+			t.Error("areFilesHardLinked did not return an error for a nonexistent file, but one was expected")
+		}
+	})
 }

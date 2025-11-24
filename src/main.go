@@ -7,11 +7,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -25,6 +27,8 @@ type Deduplicator struct {
 	// Configuration
 	rootDir  string
 	hashFunc fswalk.HashFunc
+	out      io.Writer
+	logger   *log.Logger
 
 	// Results / State
 	fileMap         map[string]iphash.HashBytes // path -> hash
@@ -38,11 +42,13 @@ type Deduplicator struct {
 }
 
 // --- Constructor ---
-func NewDeduplicator(rootDir string, hashFunc fswalk.HashFunc) *Deduplicator {
+func NewDeduplicator(rootDir string, hashFunc fswalk.HashFunc, out io.Writer) *Deduplicator {
 	return &Deduplicator{
 		rootDir:         rootDir,
 		hashFunc:        hashFunc,
-		fileMap:         make(map[string]iphash.HashBytes), // Initialize maps
+		out:             out,
+		logger:          log.New(out, "INFO: ", log.LstdFlags),
+		fileMap:         make(map[string]iphash.HashBytes),
 		fileByteMap:     make(map[string]string),
 		fileByteMapDups: make(map[string][]string),
 		discoveredPaths: []string{}, // Initialize slice
@@ -51,7 +57,7 @@ func NewDeduplicator(rootDir string, hashFunc fswalk.HashFunc) *Deduplicator {
 
 // Run executes the main deduplication process.
 func (d *Deduplicator) Run(ctx context.Context, numWorkers int) error {
-	log.Println("Starting parallel file scan and hash calculation...")
+	d.logger.Println("Starting parallel file scan and hash calculation...")
 
 	// Call DigestAll, passing the context and the hash function from the struct
 	returnedFileMap, returnedDiscoveredPaths, err := fswalk.DigestAll(
@@ -64,10 +70,10 @@ func (d *Deduplicator) Run(ctx context.Context, numWorkers int) error {
 	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			log.Println("Operation cancelled.")
+			d.logger.Println("Operation cancelled.")
 			return err
 		}
-		log.Printf("Error during file scanning/hashing: %v", err)
+		d.logger.Printf("Error during file scanning/hashing: %v", err)
 		return fmt.Errorf("file scanning/hashing failed: %w", err)
 	}
 
@@ -75,19 +81,16 @@ func (d *Deduplicator) Run(ctx context.Context, numWorkers int) error {
 	d.fileMap = returnedFileMap
 	d.discoveredPaths = returnedDiscoveredPaths
 
-	log.Println("Hash calculation complete. Processing results for duplicates...")
+	d.logger.Println("Hash calculation complete. Processing results for duplicates...")
 	d.findDuplicates()
-
-	// Reporting
-	d.reportFileMap()
-	d.reportDuplicates()
-	d.reportSummary()
 
 	return nil // Success
 }
 
 // startProgressReporter runs in a goroutine to periodically display progress.
-func (d *Deduplicator) startProgressReporter(ctx context.Context) {
+func (d *Deduplicator) startProgressReporter(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done() // Signal that this goroutine has finished when it returns.
+
 	ticker := time.NewTicker(1 * time.Second) // Update every second
 	defer ticker.Stop()
 
@@ -127,9 +130,8 @@ func (d *Deduplicator) findDuplicates() {
 		if !ok {
 			d.fileByteMap[hashString] = path
 		} else {
-			fmt.Printf("\rDUPLICATE [%s] == [%s]\n", path, orig)
 			if _, exists := d.fileByteMapDups[hashString]; !exists {
-				d.fileByteMapDups[hashString] = []string{orig}
+				d.fileByteMapDups[hashString] = []string{orig} // Add the original file first
 			}
 			d.fileByteMapDups[hashString] = append(d.fileByteMapDups[hashString], path)
 		}
@@ -138,59 +140,58 @@ func (d *Deduplicator) findDuplicates() {
 
 // reportFileMap prints the content of the fileMap (path -> hash).
 func (d *Deduplicator) reportFileMap() {
-	fmt.Println("\nDump FileMap (Path -> Hash)\n-------------------------")
+	fmt.Fprintln(d.out, "\nDump FileMap (Path -> Hash)\n-------------------------")
 	count := 0
 	limit := 50 // Example limit
 
 	// Access struct field directly
-	fmt.Printf("FileMap contains %d entries\n", len(d.fileMap))
+	fmt.Fprintf(d.out, "FileMap contains %d entries\n", len(d.fileMap))
 
 	for key, element := range d.fileMap {
 		str := hex.EncodeToString(element)
-		fmt.Println("Hash:", str, ":", key)
+		fmt.Fprintln(d.out, "Hash:", str, ":", key)
 		count++
 		if count >= limit {
-			fmt.Println("... (output limited to", limit, "entries)")
+			fmt.Fprintln(d.out, "... (output limited to", limit, "entries)")
 			break
 		}
 	}
-	fmt.Println("-------------------------")
+	fmt.Fprintln(d.out, "-------------------------")
 }
 
 // reportDuplicates prints the content of the fileByteMapDups (hash -> paths).
 func (d *Deduplicator) reportDuplicates() {
-	fmt.Println("\nDump FileMapDups (Hash -> Duplicate Paths)\n-------------------------")
+	fmt.Fprintln(d.out, "\nDump FileMapDups (Hash -> Duplicate Paths)\n-------------------------")
 	if len(d.fileByteMapDups) == 0 {
-		fmt.Println("No duplicates found.")
+		fmt.Fprintln(d.out, "No duplicates found.")
 	} else {
 		for hashString, element := range d.fileByteMapDups {
-			fmt.Printf("Hash |%s|: %q\n", hashString, element)
+			fmt.Fprintf(d.out, "Hash |%s|: %q\n", hashString, element)
 		}
 	}
-	fmt.Println("-------------------------")
+	fmt.Fprintln(d.out, "-------------------------")
 }
 
 // reportSummary prints the final statistics.
 func (d *Deduplicator) reportSummary() {
-	fmt.Println(len(d.fileMap), " Files scanned and hashed.")
-	fmt.Println(len(d.fileByteMap), " unique file content hashes found.")
-	fmt.Println(len(d.discoveredPaths), " directories discovered (excluding root).")
+	fmt.Fprintf(d.out, "%d Files scanned and hashed.\n", len(d.fileMap))
+	fmt.Fprintf(d.out, "%d unique file content hashes found.\n", len(d.fileByteMap))
+	fmt.Fprintf(d.out, "%d directories discovered (excluding root).\n", len(d.discoveredPaths))
 }
-
-// // Keep global maps as they are used for processing and reporting
-// var FileByteMap map[string]string
-// var FileByteMapDups map[string][]string
-// var FileMap map[string]iphash.HashBytes
-// var discoveredPaths []string
 
 // --- Define command-line flag ---
 var (
 	hashAlgorithm = flag.String("algo", "sha256", "Hashing algorithm to use (md5 or sha256)")
 	workers       = flag.Int("workers", runtime.NumCPU(), "Number of concurrent hashing workers")
+	dryRun        = flag.Bool("dry-run", false, "Perform a dry run without actual deduplication actions")
 )
 
 func main() {
-	flag.Parse() // Parse command-line flags
+	flag.Parse()  // Parse command-line flags
+	var err error // Declare err at the top of the function scope.
+
+	// Configure the default logger to not have prefixes, as our app logger will.
+	log.SetFlags(0)
 
 	// --- Validate number of workers ---
 	if *workers < 1 {
@@ -211,30 +212,35 @@ func main() {
 		log.Fatalf("Error: Invalid hashing algorithm '%s'. Please use 'md5' or 'sha256'.", *hashAlgorithm)
 	}
 
-	workingDir, err := os.Getwd()
-	if err != nil {
-		log.Fatalf("Failed to get working directory: %v", err)
+	// --- Determine the root directory to scan ---
+	scanDir := flag.Arg(0) // Get the first non-flag argument
+	if scanDir == "" {
+		// If no directory is provided, default to the current working directory.
+		scanDir, err = os.Getwd()
+		if err != nil {
+			log.Fatalf("Failed to get current working directory: %v", err)
+		}
+		log.Printf("No directory specified, using current directory: %s", scanDir)
 	}
 
 	// --- Create Application Instance ---
-	app := NewDeduplicator(workingDir, selectedHashFunc)
+	app := NewDeduplicator(scanDir, selectedHashFunc, os.Stdout)
 
 	// --- Setup Context for Cancellation (e.g., on Ctrl+C) ---
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop() // Important: call stop to release resources when main exits
 
 	// --- Start Progress Reporter ---
+	var wg sync.WaitGroup
+	wg.Add(1)
 	fmt.Print("\033[s") // Save cursor position
-	go app.startProgressReporter(ctx)
+	go app.startProgressReporter(ctx, &wg)
 
 	// --- Run the Application ---
-	app.Run(ctx, *workers)
+	err = app.Run(ctx, *workers)
 
-	// --- Ensure newline after progress reporter finishes ---
-	// A small delay might be needed if Run finishes extremely quickly,
-	// otherwise the final reporter print might overwrite logs.
-	time.Sleep(100 * time.Millisecond) // Optional small delay
-	// Or rely on the final print within startProgressReporter having a newline.
+	// Wait for the progress reporter to finish printing its final line and exit.
+	wg.Wait()
 
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -244,5 +250,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Println("Application finished successfully.")
+	// --- Report the results ---
+	if *dryRun {
+		app.logger.Println("Dry run mode: No files would be modified.")
+	}
+
+	app.reportDuplicates()
+	app.reportSummary()
+
+	app.logger.Println("Application finished successfully.")
 }

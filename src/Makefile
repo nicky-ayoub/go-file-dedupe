@@ -5,7 +5,7 @@ BINARY_NAME=go-file-dedupe
 GO_CMD := go
 
 
-.PHONY: all build clean fmt help lint test test-clean
+.PHONY: all build clean fmt help lint test
 
 all: build
 
@@ -34,9 +34,9 @@ check: fmt vet lint ## Run all code quality checks (format, vet, lint).
 test: ## Run tests with the race detector enabled.
 	$(GO_CMD) test -v -race ./...
 
-test-clean: ## Clear the test cache.
-	$(GO_CMD) clean -testcache
-
 clean: ## Remove build artifacts
 	@echo "Cleaning..."
 	@if [ -f "$(BINARY_NAME)" ]; then rm $(BINARY_NAME); fi
+
+
+

@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,8 +31,10 @@ type Deduplicator struct {
 	logger   *log.Logger
 
 	// Results / State
-	fileByteMapDups map[string][]string // hash(string) -> duplicate_paths
-	discoveredPaths []string            // All discovered sub-directories
+	fileMap         map[string]iphash.HashBytes // path -> hash
+	fileByteMap     map[string]string           // hash(string) -> first_path
+	fileByteMapDups map[string][]string         // hash(string) -> duplicate_paths
+	discoveredPaths []string
 
 	// Progress Counters (Atomic)
 	filesFoundCount  atomic.Uint64 // Use atomic types
@@ -45,8 +48,10 @@ func NewDeduplicator(rootDir string, hashFunc fswalk.HashFunc, out io.Writer) *D
 		hashFunc:        hashFunc,
 		out:             out,
 		logger:          log.New(out, "INFO: ", log.LstdFlags),
-		fileByteMapDups: make(map[string][]string), // Initialize map
-		discoveredPaths: []string{},                // Initialize slice
+		fileMap:         make(map[string]iphash.HashBytes),
+		fileByteMap:     make(map[string]string),
+		fileByteMapDups: make(map[string][]string),
+		discoveredPaths: []string{}, // Initialize slice
 	}
 }
 
@@ -55,7 +60,7 @@ func (d *Deduplicator) Run(ctx context.Context, numWorkers int) error {
 	d.logger.Println("Starting parallel file scan and hash calculation...")
 
 	// Call DigestAll, passing the context and the hash function from the struct
-	returnedDuplicates, returnedDiscoveredPaths, err := fswalk.DigestAll(
+	returnedFileMap, returnedDiscoveredPaths, err := fswalk.DigestAll(
 		ctx,
 		d.rootDir,
 		d.hashFunc,
@@ -73,8 +78,11 @@ func (d *Deduplicator) Run(ctx context.Context, numWorkers int) error {
 	}
 
 	// Store results in the struct fields
-	d.fileByteMapDups = returnedDuplicates
+	d.fileMap = returnedFileMap
 	d.discoveredPaths = returnedDiscoveredPaths
+
+	d.logger.Println("Hash calculation complete. Processing results for duplicates...")
+	d.findDuplicates()
 
 	return nil // Success
 }
@@ -113,6 +121,44 @@ func (d *Deduplicator) startProgressReporter(ctx context.Context, wg *sync.WaitG
 	}
 }
 
+// findDuplicates processes the fileMap to populate duplicate information.
+func (d *Deduplicator) findDuplicates() {
+	for path, hashBytes := range d.fileMap {
+		hashString := hex.EncodeToString(hashBytes)
+
+		orig, ok := d.fileByteMap[hashString]
+		if !ok {
+			d.fileByteMap[hashString] = path
+		} else {
+			if _, exists := d.fileByteMapDups[hashString]; !exists {
+				d.fileByteMapDups[hashString] = []string{orig} // Add the original file first
+			}
+			d.fileByteMapDups[hashString] = append(d.fileByteMapDups[hashString], path)
+		}
+	}
+}
+
+// reportFileMap prints the content of the fileMap (path -> hash).
+func (d *Deduplicator) reportFileMap() {
+	fmt.Fprintln(d.out, "\nDump FileMap (Path -> Hash)\n-------------------------")
+	count := 0
+	limit := 50 // Example limit
+
+	// Access struct field directly
+	fmt.Fprintf(d.out, "FileMap contains %d entries\n", len(d.fileMap))
+
+	for key, element := range d.fileMap {
+		str := hex.EncodeToString(element)
+		fmt.Fprintln(d.out, "Hash:", str, ":", key)
+		count++
+		if count >= limit {
+			fmt.Fprintln(d.out, "... (output limited to", limit, "entries)")
+			break
+		}
+	}
+	fmt.Fprintln(d.out, "-------------------------")
+}
+
 // reportDuplicates prints the content of the fileByteMapDups (hash -> paths).
 func (d *Deduplicator) reportDuplicates() {
 	fmt.Fprintln(d.out, "\nDump FileMapDups (Hash -> Duplicate Paths)\n-------------------------")
@@ -128,15 +174,8 @@ func (d *Deduplicator) reportDuplicates() {
 
 // reportSummary prints the final statistics.
 func (d *Deduplicator) reportSummary() {
-	totalFilesHashed := d.filesHashedCount.Load()
-	totalDuplicates := 0
-	for _, paths := range d.fileByteMapDups {
-		totalDuplicates += len(paths) - 1
-	}
-	uniqueFiles := totalFilesHashed - uint64(totalDuplicates)
-
-	fmt.Fprintf(d.out, "%d Files scanned and hashed.\n", totalFilesHashed)
-	fmt.Fprintf(d.out, "%d unique file content hashes found.\n", uniqueFiles)
+	fmt.Fprintf(d.out, "%d Files scanned and hashed.\n", len(d.fileMap))
+	fmt.Fprintf(d.out, "%d unique file content hashes found.\n", len(d.fileByteMap))
 	fmt.Fprintf(d.out, "%d directories discovered (excluding root).\n", len(d.discoveredPaths))
 }
 

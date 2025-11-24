@@ -10,8 +10,6 @@ import (
 	"io" // Import the io package for io.Copy
 	"os"
 	"sync"
-
-	"github.com/zeebo/blake3"
 )
 
 // bufferPool is used to reuse buffers for file hashing to reduce memory allocations.
@@ -36,12 +34,6 @@ func GetFileHashMD5bytes(path string) (HashBytes, error) {
 // This version avoids loading the entire file into memory.
 func GetFileHashSHA256bytes(path string) (HashBytes, error) {
 	return getFileHash(path, sha256.New())
-}
-
-// GetFileHashBLAKE3bytes calculates the BLAKE3 hash of a file efficiently using streaming I/O.
-// This version avoids loading the entire file into memory.
-func GetFileHashBLAKE3bytes(path string) (HashBytes, error) {
-	return getFileHash(path, blake3.New())
 }
 
 // getFileHash is an internal helper that computes the hash of a file using a provided hash.Hash implementation.

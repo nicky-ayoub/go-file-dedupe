@@ -56,31 +56,6 @@ func TestGetFileHashSHA256bytes(t *testing.T) {
 	}
 }
 
-// TestGetFileHashBLAKE3bytes checks if the BLAKE3 hashing function works correctly.
-func TestGetFileHashBLAKE3bytes(t *testing.T) {
-	// Create a temporary file with known content.
-	content := []byte("hello world")
-	// The known BLAKE3 hash for "hello world"
-	expectedHash := "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
-
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "testfile.txt")
-	if err := os.WriteFile(tmpFile, content, 0666); err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-
-	// Test the hashing function
-	hashBytes, err := GetFileHashBLAKE3bytes(tmpFile)
-	if err != nil {
-		t.Fatalf("GetFileHashBLAKE3bytes returned an unexpected error: %v", err)
-	}
-
-	hashString := HashToString(hashBytes)
-	if hashString != expectedHash {
-		t.Errorf("Hash mismatch. Got: %s, Want: %s", hashString, expectedHash)
-	}
-}
-
 // TestGetFileHash_NonExistentFile checks that an error is returned for a file that doesn't exist.
 func TestGetFileHash_NonExistentFile(t *testing.T) {
 	_, err := GetFileHashMD5bytes("non-existent-file.txt")

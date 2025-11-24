@@ -4,10 +4,13 @@ package iphash
 import (
 	"crypto/md5"
 	"crypto/sha256"
-	"encoding/hex"
-	"fmt" // Import the hash interface
-	"io"  // Import the io package for io.Copy
+	"encoding/hex" // Import the hash interface
+	"fmt"
+	"hash"
+	"io" // Import the io package for io.Copy
 	"os"
+
+	"github.com/zeebo/blake3"
 )
 
 // HashBytes remains the same type alias for the MD5 fixed-size array
@@ -16,64 +19,35 @@ type HashBytes []byte
 // GetFileHashBytes calculates the MD5 hash of a file efficiently using streaming I/O.
 // This version avoids loading the entire file into memory.
 func GetFileHashMD5bytes(path string) (HashBytes, error) {
-	var result HashBytes // Pre-allocate the result array
-
-	file, err := os.Open(path)
-	if err != nil {
-		// Add context to the error, wrap original error
-		return result, fmt.Errorf("failed to open file %s: %w", path, err)
-	}
-	defer file.Close() // Ensure file is closed
-
-	// Create a new MD5 hasher. md5.New() returns a hash.Hash interface.
-	hasher := md5.New()
-
-	// io.Copy efficiently copies data from the file (Reader) to the hasher (Writer)
-	// using an internal buffer. This avoids loading the whole file.
-	if _, err := io.Copy(hasher, file); err != nil {
-		return result, fmt.Errorf("failed to hash file %s: %w", path, err)
-	}
-
-	// Get the final hash sum. hasher.Sum(nil) appends the hash to a nil slice.
-	hashSlice := hasher.Sum(nil)
-
-	return hashSlice, nil
+	return getFileHash(path, md5.New())
 }
 
-// GetFileHashBytes calculates the MD5 hash of a file efficiently using streaming I/O.
-// This version avoids loading the entire file into memory.
+// GetFileHashSHA256bytes calculates the SHA256 hash of a file efficiently using streaming I/O.
 func GetFileHashSHA256bytes(path string) (HashBytes, error) {
-	var result HashBytes // Pre-allocate the result array
+	return getFileHash(path, sha256.New())
+}
 
+// GetFileHashBLAKE3bytes calculates the BLAKE3 hash of a file efficiently using streaming I/O.
+func GetFileHashBLAKE3bytes(path string) (HashBytes, error) {
+	return getFileHash(path, blake3.New())
+}
+
+// getFileHash is a generic helper that computes the hash of a file using any provided hash.Hash implementation.
+func getFileHash(path string, hasher hash.Hash) (HashBytes, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		// Add context to the error, wrap original error
-		return result, fmt.Errorf("failed to open file %s: %w", path, err)
+		return nil, fmt.Errorf("failed to open file %s: %w", path, err)
 	}
 	defer file.Close() // Ensure file is closed
 
-	hasher := sha256.New()
-
 	// io.Copy efficiently copies data from the file (Reader) to the hasher (Writer)
-	// using an internal buffer. This avoids loading the whole file.
 	if _, err := io.Copy(hasher, file); err != nil {
-		return result, fmt.Errorf("failed to hash file %s: %w", path, err)
+		return nil, fmt.Errorf("failed to hash file %s: %w", path, err)
 	}
 
 	// Get the final hash sum. hasher.Sum(nil) appends the hash to a nil slice.
-	hashSlice := hasher.Sum(nil)
-
-	return hashSlice, nil
+	return hasher.Sum(nil), nil
 }
-
-// GetFileHashBytesOriginal - Keeping the old implementation for reference if needed
-// func GetFileHashBytesOriginal(path string) (HashBytes, error) {
-// 	data, err := os.ReadFile(path) // Inefficient part
-// 	if err != nil {
-// 		return HashBytes{}, fmt.Errorf("could not read digest: %w", err) // Use %w for wrapping
-// 	}
-// 	return md5.Sum(data), nil
-// }
 
 // GetFileHash remains the same, it now benefits from the efficient GetFileHashBytes
 func GetFileHash(path string) (string, error) {

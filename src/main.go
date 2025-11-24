@@ -185,7 +185,7 @@ func (d *Deduplicator) reportSummary() {
 
 // --- Define command-line flag ---
 var (
-	hashAlgorithm = flag.String("algo", "sha256", "Hashing algorithm to use (md5 or sha256)")
+	hashAlgorithm = flag.String("algo", "blake3", "Hashing algorithm to use (blake3, sha256, or md5)")
 	workers       = flag.Int("workers", runtime.NumCPU(), "Number of concurrent hashing workers")
 )
 
@@ -201,6 +201,9 @@ func main() {
 	// --- Select the hashing function based on the flag ---
 	var selectedHashFunc fswalk.HashFunc // Use the exported type from fswalk
 	switch strings.ToLower(*hashAlgorithm) {
+	case "blake3":
+		selectedHashFunc = iphash.GetFileHashBLAKE3bytes
+		log.Println("Using BLAKE3 hashing algorithm.")
 	case "md5":
 		selectedHashFunc = iphash.GetFileHashMD5bytes
 		log.Println("Using MD5 hashing algorithm.")
@@ -208,7 +211,7 @@ func main() {
 		selectedHashFunc = iphash.GetFileHashSHA256bytes
 		log.Println("Using SHA256 hashing algorithm.")
 	default:
-		log.Fatalf("Error: Invalid hashing algorithm '%s'. Please use 'md5' or 'sha256'.", *hashAlgorithm)
+		log.Fatalf("Error: Invalid hashing algorithm '%s'. Please use 'blake3', 'sha256', or 'md5'.", *hashAlgorithm)
 	}
 
 	workingDir, err := os.Getwd()

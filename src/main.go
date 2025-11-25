@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -126,19 +127,28 @@ func (d *Deduplicator) startProgressReporter(ctx context.Context, wg *sync.WaitG
 
 // findDuplicates processes the fileMap to populate duplicate information.
 func (d *Deduplicator) findDuplicates() {
+	d.logger.Println("Starting findDuplicates...")
+
+	// Iterate through all hashed files to identify originals and duplicates.
 	for path, hashBytes := range d.fileMap {
 		hashString := hex.EncodeToString(hashBytes)
 
-		orig, ok := d.fileByteMap[hashString]
+		// Check if we have already seen this hash.
+		originalPath, ok := d.fileByteMap[hashString]
 		if !ok {
+			// First time seeing this hash. Record it as the original.
 			d.fileByteMap[hashString] = path
 		} else {
+			// This hash has been seen before. This is a duplicate.
+			// If this is the first duplicate for this hash, add the original file first.
 			if _, exists := d.fileByteMapDups[hashString]; !exists {
-				d.fileByteMapDups[hashString] = []string{orig} // Add the original file first
+				d.fileByteMapDups[hashString] = []string{originalPath}
 			}
+			// Append the new duplicate path.
 			d.fileByteMapDups[hashString] = append(d.fileByteMapDups[hashString], path)
 		}
 	}
+	d.logger.Println("Finished findDuplicates.")
 }
 
 // reportDuplicates prints the content of the fileByteMapDups (hash -> paths).
@@ -226,6 +236,8 @@ var (
 	workers       = flag.Int("workers", runtime.NumCPU(), "Number of concurrent hashing workers")
 	dryRun        = flag.Bool("dry-run", false, "Perform a dry run without actual deduplication actions")
 	hardlink      = flag.Bool("hardlink", false, "Replace duplicate files with hard links to the original file")
+	cpuprofile    = flag.String("cpuprofile", "", "write cpu profile to `file`")
+	memprofile    = flag.String("memprofile", "", "write memory profile to `file`")
 )
 
 func main() {
@@ -234,6 +246,20 @@ func main() {
 
 	// Configure the default logger to not have prefixes, as our app logger will.
 	log.SetFlags(0)
+
+	// --- Setup Profiling ---
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatalf("could not create CPU profile: %v", err)
+		}
+		defer f.Close() //
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatalf("could not start CPU profile: %v", err)
+		}
+		// pprof.StopCPUProfile() will be called at the end of main.
+		defer pprof.StopCPUProfile()
+	}
 
 	// --- Validate number of workers ---
 	if *workers < 1 {
@@ -276,14 +302,19 @@ func main() {
 	defer stop() // Important: call stop to release resources when main exits
 
 	// --- Start Progress Reporter ---
+	// Create a separate context for the progress reporter so we can cancel it
+	// independently when the main work is done.
+	reporterCtx, cancelReporter := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	fmt.Print("\033[s") // Save cursor position
-	go app.startProgressReporter(ctx, &wg)
+	go app.startProgressReporter(reporterCtx, &wg)
 
 	// --- Run the Application ---
 	err = app.Run(ctx, *workers)
 
+	// Signal the progress reporter to stop and print its final status.
+	cancelReporter()
 	// Wait for the progress reporter to finish printing its final line and exit.
 	wg.Wait()
 
@@ -303,6 +334,20 @@ func main() {
 	// --- Perform Hard Linking if requested ---
 	if *hardlink && !*dryRun {
 		app.hardlinkDuplicates()
+	}
+
+	// --- Write Memory Profile if requested ---
+	if *memprofile != "" {
+		f, err := os.Create(*memprofile)
+		if err != nil {
+			log.Fatalf("could not create memory profile: %v", err)
+		}
+		defer f.Close()
+		runtime.GC() // get up-to-date statistics
+		if err := pprof.WriteHeapProfile(f); err != nil {
+			log.Fatalf("could not write memory profile: %v", err)
+		}
+		app.logger.Printf("Memory profile written to %s", *memprofile)
 	}
 
 	app.reportDuplicates()

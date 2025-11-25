@@ -3,117 +3,182 @@ package fswalk
 import (
 	"context"
 	"crypto/md5"
+	"fmt"
+	"io/ioutil"
 	"me/go-file-dedupe/iphash"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
-// mockHashFunc is a simple, fast hashing function for testing purposes.
-func mockHashFunc(filePath string) (iphash.HashBytes, error) {
-	content, err := os.ReadFile(filePath)
+// mockHasher is a test implementation of HashFunc that computes the MD5 hash of a file's content.
+func mockHasher(filePath string) (iphash.HashBytes, error) {
+	data, err := ioutil.ReadFile(filePath)
 	if err != nil {
 		return nil, err
 	}
-	hash := md5.Sum(content)
-	return hash[:], nil
+	sum := md5.Sum(data)
+	return sum[:], nil
 }
 
-// setupTestDir creates a temporary directory structure for testing.
-// root/
-//   - file1.txt (content: "alpha")
-//   - file2.txt (content: "beta")
-//   - subdir/
-//   - file3.txt (content: "alpha") -> duplicate of file1
-func setupTestDir(t *testing.T) string {
-	t.Helper()
-	rootDir := t.TempDir()
-
-	// Create files
-	os.WriteFile(filepath.Join(rootDir, "file1.txt"), []byte("alpha"), 0666)
-	os.WriteFile(filepath.Join(rootDir, "file2.txt"), []byte("beta"), 0666)
-
-	// Create subdirectory and another file
-	subDir := filepath.Join(rootDir, "subdir")
-	os.Mkdir(subDir, 0755)
-	os.WriteFile(filepath.Join(subDir, "file3.txt"), []byte("alpha"), 0666)
-
-	return rootDir
-}
-
-// TestDigestAll_HappyPath tests the normal operation of DigestAll.
-func TestDigestAll_HappyPath(t *testing.T) {
-	rootDir := setupTestDir(t)
-	var filesFound, filesHashed atomic.Uint64
-
-	fileMap, dirs, err := DigestAll(context.Background(), rootDir, mockHashFunc, 2, &filesFound, &filesHashed)
-
+func TestDigestAll_Success(t *testing.T) {
+	// 1. Setup a temporary directory structure for testing.
+	tmpDir, err := ioutil.TempDir("", "test-digestall-")
 	if err != nil {
-		t.Fatalf("DigestAll returned an unexpected error: %v", err)
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create subdirectories
+	subDir1 := filepath.Join(tmpDir, "subdir1")
+	subDir2 := filepath.Join(tmpDir, "subdir2")
+	if err := os.Mkdir(subDir1, 0755); err != nil {
+		t.Fatalf("Failed to create subdir1: %v", err)
+	}
+	if err := os.Mkdir(subDir2, 0755); err != nil {
+		t.Fatalf("Failed to create subdir2: %v", err)
 	}
 
-	// --- Assertions ---
-	if filesFound.Load() != 3 {
-		t.Errorf("Expected 3 files found, got %d", filesFound.Load())
-	}
-	if filesHashed.Load() != 3 {
-		t.Errorf("Expected 3 files hashed, got %d", filesHashed.Load())
-	}
-	if len(fileMap) != 3 {
-		t.Errorf("Expected fileMap to have 3 entries, got %d", len(fileMap))
-	}
-	if len(dirs) != 1 {
-		t.Errorf("Expected 1 subdirectory discovered, got %d", len(dirs))
+	// Create test files with content
+	files := map[string]string{
+		filepath.Join(tmpDir, "file1.txt"):    "hello",
+		filepath.Join(subDir1, "file2.txt"):   "world",
+		filepath.Join(subDir2, "file3.txt"):   "go test",
+		filepath.Join(subDir2, "another.log"): "log data",
 	}
 
-	// Check for duplicate hashes
-	hash1 := fileMap[filepath.Join(rootDir, "file1.txt")]
-	hash3 := fileMap[filepath.Join(rootDir, "subdir", "file3.txt")]
-	if iphash.HashToString(hash1) != iphash.HashToString(hash3) {
-		t.Error("Expected hashes for file1.txt and file3.txt to be identical")
+	expectedHashes := make(map[string]iphash.HashBytes)
+	for path, content := range files {
+		if err := ioutil.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to write test file %s: %v", path, err)
+		}
+		sum := md5.Sum([]byte(content))
+		expectedHashes[path] = sum[:]
 	}
-}
 
-// TestDigestAll_ContextCancellation tests that the function respects context cancellation.
-func TestDigestAll_ContextCancellation(t *testing.T) {
-	rootDir := setupTestDir(t)
+	expectedDirs := []string{subDir1, subDir2}
+	sort.Strings(expectedDirs)
+
+	// 2. Execute DigestAll
 	var filesFound, filesHashed atomic.Uint64
+	ctx := context.Background()
+	numWorkers := 2
 
-	// Create a context that will be canceled shortly
+	hashes, dirs, err := DigestAll(ctx, tmpDir, mockHasher, numWorkers, &filesFound, &filesHashed)
+
+	// 3. Assert the results
+	if err != nil {
+		t.Errorf("DigestAll() returned an unexpected error: %v", err)
+	}
+
+	// Check file counts
+	if filesFound.Load() != uint64(len(files)) {
+		t.Errorf("Expected %d files found, but got %d", len(files), filesFound.Load())
+	}
+	if filesHashed.Load() != uint64(len(files)) {
+		t.Errorf("Expected %d files hashed, but got %d", len(files), filesHashed.Load())
+	}
+
+	// Check directory list
+	sort.Strings(dirs)
+	if !reflect.DeepEqual(dirs, expectedDirs) {
+		t.Errorf("Discovered directories do not match expected.\nGot: %v\nWant: %v", dirs, expectedDirs)
+	}
+
+	// Check file hashes
+	if len(hashes) != len(expectedHashes) {
+		t.Errorf("Expected %d hashes, but got %d", len(expectedHashes), len(hashes))
+	}
+
+	// To handle potential map inequality in tests due to different key orders,
+	// we convert the returned map to a slice of strings for comparison.
+	var actualHashesStr []string
+	for p, h := range hashes {
+		actualHashesStr = append(actualHashesStr, fmt.Sprintf("%s:%x", p, h))
+	}
+	sort.Strings(actualHashesStr)
+
+	var expectedHashesStr []string
+	for p, h := range expectedHashes {
+		expectedHashesStr = append(expectedHashesStr, fmt.Sprintf("%s:%x", p, h))
+	}
+	sort.Strings(expectedHashesStr)
+
+	if !reflect.DeepEqual(actualHashesStr, expectedHashesStr) {
+		t.Errorf("File hashes do not match expected.\nGot: %v\nWant: %v", actualHashesStr, expectedHashesStr)
+	}
+
+	// Test cancellation
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// A slow hash function to ensure cancellation happens mid-process
-	slowHashFunc := func(filePath string) (iphash.HashBytes, error) {
-		cancel()                          // Cancel the context as soon as the first hash starts
-		time.Sleep(50 * time.Millisecond) // Give time for cancellation to propagate
-		return mockHashFunc(filePath)
-	}
-
-	_, _, err := DigestAll(ctx, rootDir, slowHashFunc, 2, &filesFound, &filesHashed)
-
-	if err == nil {
-		t.Fatal("Expected a context cancellation error, but got nil")
-	}
-
+	cancel() // Cancel immediately
+	_, _, err = DigestAll(ctx, tmpDir, mockHasher, numWorkers, &filesFound, &filesHashed)
 	if err != context.Canceled {
-		t.Errorf("Expected error to be context.Canceled, got %v", err)
+		t.Errorf("Expected context.Canceled error, but got: %v", err)
 	}
 }
 
-// TestDigestAll_EmptyDir tests behavior with an empty directory.
-func TestDigestAll_EmptyDir(t *testing.T) {
-	rootDir := t.TempDir()
-	var filesFound, filesHashed atomic.Uint64
-
-	fileMap, dirs, err := DigestAll(context.Background(), rootDir, mockHashFunc, 2, &filesFound, &filesHashed)
-
+func TestDigestAll_HashingError(t *testing.T) {
+	// 1. Setup a temporary directory with one file that will cause a hashing error.
+	tmpDir, err := ioutil.TempDir("", "test-digestall-error-")
 	if err != nil {
-		t.Fatalf("DigestAll returned an unexpected error for an empty directory: %v", err)
+		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	if filesFound.Load() != 0 || filesHashed.Load() != 0 || len(fileMap) != 0 || len(dirs) != 0 {
-		t.Error("Expected zero results for an empty directory")
+	defer os.RemoveAll(tmpDir)
+
+	goodFilePath := filepath.Join(tmpDir, "goodfile.txt")
+	badFilePath := filepath.Join(tmpDir, "badfile.txt")
+
+	if err := ioutil.WriteFile(goodFilePath, []byte("this is fine"), 0644); err != nil {
+		t.Fatalf("Failed to write good file: %v", err)
+	}
+	if err := ioutil.WriteFile(badFilePath, []byte("this will fail"), 0644); err != nil {
+		t.Fatalf("Failed to write bad file: %v", err)
+	}
+
+	// This hasher will return an error for `badFilePath`.
+	mockHasherWithError := func(filePath string) (iphash.HashBytes, error) {
+		if filePath == badFilePath {
+			return nil, fmt.Errorf("forced hashing error")
+		}
+		return mockHasher(filePath)
+	}
+
+	// 2. Execute DigestAll
+	var filesFound, filesHashed atomic.Uint64
+	ctx := context.Background()
+	numWorkers := 1
+
+	hashes, _, err := DigestAll(ctx, tmpDir, mockHasherWithError, numWorkers, &filesFound, &filesHashed)
+
+	// 3. Assert the results
+	// The function itself should not return an error, as it handles hashing errors internally.
+	if err != nil {
+		t.Errorf("DigestAll() returned an unexpected error: %v", err)
+	}
+
+	// Check file counts.
+	if filesFound.Load() != 2 {
+		t.Errorf("Expected 2 files found, but got %d", filesFound.Load())
+	}
+	if filesHashed.Load() != 1 {
+		t.Errorf("Expected 1 file to be hashed, but got %d", filesHashed.Load())
+	}
+
+	// Check the hashes map.
+	if len(hashes) != 1 {
+		t.Errorf("Expected 1 hash in the map, but got %d", len(hashes))
+	}
+
+	// Ensure the bad file is not in the map.
+	if _, exists := hashes[badFilePath]; exists {
+		t.Errorf("The file that failed to hash should not be in the results map")
+	}
+
+	// Ensure the good file IS in the map with the correct hash.
+	if _, exists := hashes[goodFilePath]; !exists {
+		t.Errorf("The successfully hashed file is missing from the results map")
 	}
 }

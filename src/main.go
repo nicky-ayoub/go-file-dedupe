@@ -109,9 +109,18 @@ func (d *Deduplicator) startProgressReporter(ctx context.Context, wg *sync.WaitG
 			hashed := d.filesHashedCount.Load()
 			elapsed := time.Since(startTime).Round(time.Second)
 
+			// --- Build Progress Bar ---
+			const barWidth = 40
+			percentage := 0.0
+			if found > 0 {
+				percentage = (float64(hashed) / float64(found)) * 100
+			}
+			completedWidth := int(percentage / 100 * float64(barWidth))
+			bar := strings.Repeat("=", completedWidth) + strings.Repeat(" ", barWidth-completedWidth)
+
 			// Print progress, overwriting previous line
 			fmt.Print("\033[u\033[K") // Restore cursor, clear line
-			fmt.Printf("Progress: Found %d files, Hashed %d files [%s]...", found, hashed, elapsed)
+			fmt.Printf("Hashing: [%s] %.1f%% (%d/%d files) [%s]", bar, percentage, hashed, found, elapsed)
 
 		case <-ctx.Done():
 			// Context cancelled (operation finished or interrupted)
@@ -120,7 +129,7 @@ func (d *Deduplicator) startProgressReporter(ctx context.Context, wg *sync.WaitG
 			hashed := d.filesHashedCount.Load()
 			elapsed := time.Since(startTime).Round(time.Second)
 			fmt.Print("\033[u\033[K") // Restore cursor, clear line
-			fmt.Printf("Progress: Found %d files, Hashed %d files [%s]... Done\n", found, hashed, elapsed)
+			fmt.Printf("Finished scan: Hashed %d of %d files found in %s.\n", hashed, found, elapsed)
 			return // Exit goroutine
 		}
 	}

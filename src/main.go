@@ -153,13 +153,33 @@ func (d *Deduplicator) findDuplicates() {
 
 // reportDuplicates prints the content of the fileByteMapDups (hash -> paths).
 func (d *Deduplicator) reportDuplicates() {
-	fmt.Fprintln(d.out, "\nDump FileMapDups (Hash -> Duplicate Paths)\n-------------------------")
+	fmt.Fprintln(d.out, "\nDuplicate File Report\n-------------------------") // More descriptive title
+
 	if len(d.fileByteMapDups) == 0 {
-		fmt.Fprintln(d.out, "No duplicates found.")
-	} else {
-		for hashString, element := range d.fileByteMapDups {
-			fmt.Fprintf(d.out, "Hash |%s|: %q\n", hashString, element)
+		fmt.Fprintln(d.out, "No duplicate files found.") // More user-friendly message
+		fmt.Fprintln(d.out, "-------------------------")
+		return
+	}
+
+	for hashString, paths := range d.fileByteMapDups {
+		fmt.Fprintf(d.out, "Hash: %s\n", hashString)
+
+		// Get the original file's size
+		originalPath := paths[0]
+		fileInfo, err := os.Stat(originalPath)
+		fileSize := int64(0) // Default to 0 in case of error
+		if err == nil {
+			fileSize = fileInfo.Size()
+		} else {
+			d.logger.Printf("Could not get file size for %s: %v", originalPath, err)
 		}
+
+		fmt.Fprintf(d.out, "  Original File: %s (Size: %d bytes)\n", originalPath, fileSize)
+		fmt.Fprintln(d.out, "  Duplicates:")
+		for i, duplicatePath := range paths[1:] { // Start from index 1 to skip the original
+			fmt.Fprintf(d.out, "    %d. %s\n", i+1, duplicatePath) // Numbered list
+		}
+		fmt.Fprintln(d.out, "---") // Separator between duplicate sets
 	}
 	fmt.Fprintln(d.out, "-------------------------")
 }

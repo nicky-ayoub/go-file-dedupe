@@ -3,6 +3,7 @@ package fswalk
 import (
 	"context"
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"me/go-file-dedupe/iphash"
@@ -180,5 +181,44 @@ func TestDigestAll_HashingError(t *testing.T) {
 	// Ensure the good file IS in the map with the correct hash.
 	if _, exists := hashes[goodFilePath]; !exists {
 		t.Errorf("The successfully hashed file is missing from the results map")
+	}
+}
+
+func TestDigestAll_WalkError(t *testing.T) {
+	// 1. Setup a directory that will cause a walk error (permission denied).
+	tmpDir, err := ioutil.TempDir("", "test-walk-error-")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create a subdirectory that we will make unreadable.
+	unreadableDir := filepath.Join(tmpDir, "unreadable")
+	if err := os.Mkdir(unreadableDir, 0755); err != nil {
+		t.Fatalf("Failed to create unreadable dir: %v", err)
+	}
+
+	// Make the directory unreadable. This will cause filepath.Walk to fail.
+	if err := os.Chmod(unreadableDir, 0000); err != nil {
+		t.Fatalf("Failed to chmod unreadable dir: %v", err)
+	}
+	// Schedule cleanup to restore permissions so os.RemoveAll can work.
+	defer os.Chmod(unreadableDir, 0755)
+
+	// 2. Execute DigestAll, expecting an error.
+	var filesFound, filesHashed atomic.Uint64
+	ctx := context.Background()
+	numWorkers := 1
+
+	_, _, err = DigestAll(ctx, tmpDir, mockHasher, numWorkers, &filesFound, &filesHashed)
+
+	// 3. Assert that we received an error, and it's the one we expect.
+	if err == nil {
+		t.Fatal("DigestAll() did not return an error, but one was expected")
+	}
+
+	// The errgroup should propagate the permission error from filepath.Walk.
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("Expected a permission error, but got a different error: %v", err)
 	}
 }

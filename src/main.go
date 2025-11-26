@@ -240,12 +240,7 @@ var (
 	memprofile    = flag.String("memprofile", "", "write memory profile to `file`")
 )
 
-func main() {
-	flag.Parse()  // Parse command-line flags
-	var err error // Declare err at the top of the function scope.
-
-	// Configure the default logger to not have prefixes, as our app logger will.
-	log.SetFlags(0)
+func processFlags() (string, fswalk.HashFunc) {
 
 	// --- Setup Profiling ---
 	if *cpuprofile != "" {
@@ -268,20 +263,13 @@ func main() {
 	log.Printf("Using %d hashing workers.", *workers)
 
 	// --- Select the hashing function based on the flag ---
-	var selectedHashFunc fswalk.HashFunc // Use the exported type from fswalk
-	switch strings.ToLower(*hashAlgorithm) {
-	case "blake3":
-		selectedHashFunc = iphash.GetFileHashBLAKE3bytes
-		log.Println("Using BLAKE3 hashing algorithm.")
-	case "md5":
-		selectedHashFunc = iphash.GetFileHashMD5bytes
-		log.Println("Using MD5 hashing algorithm.")
-	case "sha256":
-		selectedHashFunc = iphash.GetFileHashSHA256bytes
-		log.Println("Using SHA256 hashing algorithm.")
-	default:
-		log.Fatalf("Error: Invalid hashing algorithm '%s'. Please use 'blake3', 'sha256', or 'md5'.", *hashAlgorithm)
+	// Use the factory function from the iphash package to get the selected hasher.
+	algo := iphash.Algorithm(strings.ToLower(*hashAlgorithm))
+	selectedHashFunc, err := iphash.NewHasher(algo)
+	if err != nil {
+		log.Fatalf("Error: %v. Please use 'blake3', 'sha256', or 'md5'.", err)
 	}
+	log.Printf("Using %s hashing algorithm.", algo)
 
 	// --- Determine the root directory to scan ---
 	scanDir := flag.Arg(0) // Get the first non-flag argument
@@ -293,6 +281,34 @@ func main() {
 		}
 		log.Printf("No directory specified, using current directory: %s", scanDir)
 	}
+
+	// --- Validate the scan directory ---
+	info, err := os.Stat(scanDir)
+	if os.IsNotExist(err) {
+		log.Fatalf("Error: The specified directory does not exist: %s", scanDir)
+	} else if err != nil {
+		log.Fatalf("Error: Could not stat the specified path %s: %v", scanDir, err)
+	}
+	if !info.IsDir() {
+		log.Fatalf("Error: The specified path is not a directory: %s", scanDir)
+	}
+
+	// --- Validate flag combinations ---
+	if *hardlink && *dryRun {
+		log.Println("Warning: -hardlink is specified with -dry-run. No files will be changed.")
+	}
+
+	return scanDir, selectedHashFunc
+}
+
+func main() {
+
+	// Configure the default logger to not have prefixes, as our app logger will.
+	log.SetFlags(0)
+
+	flag.Parse()                                // Parse command-line flags
+	scanDir, selectedHashFunc := processFlags() // Process flags and setup profiling
+	var err error                               // Declare err at the top of the function scope.
 
 	// --- Create Application Instance ---
 	app := NewDeduplicator(scanDir, selectedHashFunc, os.Stdout)

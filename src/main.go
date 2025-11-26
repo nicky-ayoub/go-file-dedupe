@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/pprof"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -164,10 +165,13 @@ func (d *Deduplicator) reportDuplicates() {
 	for hashString, paths := range d.fileByteMapDups {
 		fmt.Fprintf(d.out, "Hash: %s\n", hashString)
 
+		// Sort paths to ensure the "Original File" is deterministic for tests
+		sort.Strings(paths)
+
 		// Get the original file's size
 		originalPath := paths[0]
-		fileInfo, err := os.Stat(originalPath)
-		fileSize := int64(0) // Default to 0 in case of error
+		fileInfo, err := osStat(originalPath) // Use the osStat variable
+		var fileSize int64                    // Default to 0 in case of error
 		if err == nil {
 			fileSize = fileInfo.Size()
 		} else {
@@ -259,6 +263,10 @@ var (
 	cpuprofile    = flag.String("cpuprofile", "", "write cpu profile to `file`")
 	memprofile    = flag.String("memprofile", "", "write memory profile to `file`")
 )
+
+// osStat is a variable that holds the os.Stat function.
+// This allows us to mock it out during testing.
+var osStat = os.Stat
 
 func processFlags() (string, fswalk.HashFunc) {
 

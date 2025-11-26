@@ -7,18 +7,30 @@ import (
 	"me/go-file-dedupe/iphash"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDeduplicator_FindAndReportDuplicates tests the core logic of finding duplicates
 // and verifying the report output.
-func TestDeduplicator_FindAndReportDuplicates(t *testing.T) {
+func TestDeduplicator_FindAndReportDuplicates(t *testing.T) { // 1. Setup: Create a buffer to capture output and a Deduplicator instance.
 	// 1. Setup: Create a buffer to capture output and a Deduplicator instance.
 	var out bytes.Buffer
 	// The hashFunc and rootDir are not critical for this specific test.
 	deduper := NewDeduplicator("/test/root", nil, &out)
+
+	// Mock os.Stat to prevent file system access in this unit test
+	originalOsStat := osStat
+	osStat = func(name string) (os.FileInfo, error) {
+		// Return a mock FileInfo object. The size is arbitrary.
+		// We use reflect.TypeOf to get a concrete type that implements os.FileInfo
+		return &mockFileInfo{name: name, size: 123}, nil
+	}
+	// Restore the original function at the end of the test
+	defer func() { osStat = originalOsStat }()
 
 	// 2. Manually populate the fileMap to simulate the result of a file scan.
 	// Hash for "alpha" is 99c7a8d0b733ea40463b47934042799f
@@ -58,25 +70,25 @@ func TestDeduplicator_FindAndReportDuplicates(t *testing.T) {
 	// Sort the slice to make the test deterministic, regardless of map iteration order.
 	sort.Strings(dups)
 
-	expectedDups := []string{"/test/root/file1.txt", "/test/root/sub/file2.txt"}
-	if !(dups[0] == expectedDups[0] && dups[1] == expectedDups[1]) {
+	expectedDups := []string{"/test/root/file1.txt", "/test/root/sub/file2.txt"} // Sort this as well for comparison
+	sort.Strings(expectedDups)
+	if !reflect.DeepEqual(dups, expectedDups) {
 		t.Errorf("Duplicate list is incorrect. Got: %v, Want: %v", dups, expectedDups)
 	}
 
 	// Check the output written to the buffer.
 	output := out.String()
 
-	// Check for the duplicates report header.
-	if !strings.Contains(output, "Dump FileMapDups (Hash -> Duplicate Paths)") {
+	// Check for the new duplicates report header.
+	if !strings.Contains(output, "Duplicate File Report") {
 		t.Error("Output is missing the duplicates report header.")
 	}
 
-	// Check for the specific duplicate entry in the report.
-	// Since the order in the output can also vary, we check for the components separately.
-	if !strings.Contains(output, `Hash |99c7a8d0b733ea40463b47934042799f|`) ||
-		!strings.Contains(output, `"/test/root/file1.txt"`) ||
-		!strings.Contains(output, `"/test/root/sub/file2.txt"`) {
-		t.Errorf("Output is missing the correct duplicate line components.\nGot: %s", output)
+	// Check for the new, formatted output components.
+	if !strings.Contains(output, "Hash: 99c7a8d0b733ea40463b47934042799f") ||
+		!strings.Contains(output, "Original File: /test/root/file1.txt (Size: 123 bytes)") ||
+		!strings.Contains(output, "1. /test/root/sub/file2.txt") {
+		t.Errorf("Output is missing the correct new duplicate line components.\nGot: %s", output)
 	}
 
 	// Check for the summary report.
@@ -87,6 +99,19 @@ func TestDeduplicator_FindAndReportDuplicates(t *testing.T) {
 		t.Error("Output is missing the correct unique hash count in the summary.")
 	}
 }
+
+// mockFileInfo is a simple struct to mock os.FileInfo for testing.
+type mockFileInfo struct {
+	name string
+	size int64
+}
+
+func (m *mockFileInfo) Name() string       { return m.name }
+func (m *mockFileInfo) Size() int64        { return m.size }
+func (m *mockFileInfo) Mode() os.FileMode  { return 0 }
+func (m *mockFileInfo) ModTime() time.Time { return time.Time{} }
+func (m *mockFileInfo) IsDir() bool        { return false }
+func (m *mockFileInfo) Sys() interface{}   { return nil }
 
 // setupTestDir creates a temporary directory structure for integration testing.
 // root/
